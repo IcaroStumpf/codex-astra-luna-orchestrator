@@ -1,7 +1,9 @@
 # Codex Sol/Astra Orchestrator + Luna Subagents
 
-Install a Codex profile with GPT-6 Astra, Sol, or Luna as the orchestrator,
+Install a Codex profile with GPT-6 Astra, GPT-6.1 Sol, or GPT-6 Luna as the orchestrator,
 GPT-6 Luna execution subagents, and an independent reviewer.
+
+The Sol profiles use `gpt-6.1-sol` for both the orchestrator and reviewer.
 
 ## Orchestration topology
 
@@ -10,7 +12,7 @@ root, as shown in the profile table below. Execution roles use GPT-6 Luna;
 the reviewer uses Astra for Pro/Plus and Sol for Sol profiles.
 
 ```text
-              GPT-6 Astra / Sol
+           GPT-6 Astra / GPT-6.1 Sol
              root / orchestrator
                       |
       +---------------+---------------+
@@ -24,7 +26,7 @@ the reviewer uses Astra for Pro/Plus and Sol for Sol profiles.
          GPT-6 Luna
               |
           reviewer
-      GPT-6 Astra / Sol
+      GPT-6 Astra / GPT-6.1 Sol
               |
               v
            root agent

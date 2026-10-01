@@ -26,7 +26,7 @@ class SolProfileTests(unittest.TestCase):
             with self.subTest(profile=profile):
                 directory = ROOT / "profiles" / profile
                 config = tomllib.loads((directory / "codex" / "config.toml").read_text())
-                self.assertEqual(config["model"], "gpt-6-sol")
+                self.assertEqual(config["model"], "gpt-6.1-sol")
                 self.assertEqual(config["model_reasoning_effort"], effort)
                 self.assertEqual(config["sandbox_mode"], "workspace-write")
                 self.assertTrue(config["agents"]["enabled"])
@@ -45,13 +45,13 @@ class SolProfileTests(unittest.TestCase):
                 reviewer = tomllib.loads(
                     (directory / "codex" / "agents" / "reviewer.toml").read_text()
                 )
-                self.assertEqual(reviewer["model"], "gpt-6-sol")
+                self.assertEqual(reviewer["model"], "gpt-6.1-sol")
                 self.assertEqual(reviewer["model_reasoning_effort"], effort)
                 self.assertEqual(reviewer["sandbox_mode"], "read-only")
                 skill = (
                     directory / "agents" / "skills" / "astra-orchestrator" / "SKILL.md"
                 ).read_text()
-                self.assertIn(f"root: `gpt-6-sol` at `{effort}` reasoning", skill)
+                self.assertIn(f"root: `gpt-6.1-sol` at `{effort}` reasoning", skill)
                 self.assertIn(
                     "explorer, worker, tester, researcher: `gpt-6-luna` at `max` reasoning",
                     skill,
