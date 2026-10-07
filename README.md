@@ -1,4 +1,82 @@
-# Codex Sol/Astra Orchestrator + Luna Subagents
+# Codex Orchestrator
+
+A Codex plugin and terminal runtime for agent teams: durable tasks, dependency
+ordering, a live task board, configurable roles, and model changes while the
+runner stays alive. This fork builds on
+[donvito's profile installer](https://github.com/donvito/codex-astra-luna-orchestrator)
+and takes design inspiration from
+[Agent Orchestrator and oh-my-codex](guides/reference-projects.md).
+
+## Dynamic CLI and plugin
+
+Requires Python 3.11+ and an installed, signed-in Codex CLI. The Python runtime
+has no third-party runtime dependencies. It uses your local `codex app-server`;
+it does not read credentials or require a separate API key.
+
+Clone this fork, then install the CLI with your chosen interpreter's **absolute
+path**. For example, in PowerShell:
+
+```powershell
+git clone https://github.com/IcaroStumpf/codex-astra-luna-orchestrator.git
+cd codex-astra-luna-orchestrator
+$Interpreter = 'C:\absolute\path\to\python.exe'
+& $Interpreter -m pip install .
+```
+
+On macOS/Linux, use `/absolute/path/to/python -m pip install .`. Ensure that
+interpreter's Scripts/bin directory is on PATH so `codex-orchestrator` is
+available to both your terminal and Codex. From a source checkout you can also
+run `& $Interpreter -m codex_orchestrator --help` without installing.
+
+Initialize your target project and queue work:
+
+```text
+codex-orchestrator --project /absolute/project init
+codex-orchestrator --project /absolute/project doctor
+codex-orchestrator --project /absolute/project roles
+codex-orchestrator --project /absolute/project task add "Map the login flow and report relevant files" --role explorer
+codex-orchestrator --project /absolute/project serve
+```
+
+Keep `serve` running in that terminal. Use `serve --live-models` to enable
+Codex's experimental active-step model switching for this runner. In another terminal:
+
+```text
+codex-orchestrator --project /absolute/project watch
+codex-orchestrator --project /absolute/project task show TASK_ID
+codex-orchestrator --project /absolute/project task add "Review the findings" --role reviewer --after TASK_ID
+codex-orchestrator --project /absolute/project model set worker gpt-6-luna --effort medium
+codex-orchestrator --project /absolute/project task model TASK_ID gpt-6.1-sol --effort medium --live
+```
+
+Use Windows absolute paths such as `D:\Projects\my-project` on Windows.
+`serve --once` drains runnable work and exits. `watch --json` emits JSON snapshots.
+You can import model choices from an existing profile with
+`init --config /absolute/project/.codex/config.toml`; it does not rewrite that
+configuration or its permissions.
+
+The default roles are orchestrator, explorer, worker, tester, reviewer,
+researcher, architect, debugger, and documenter. Inspect or customize them
+through `roles`, `model set`, and `role add`. Model IDs remain configurable;
+`models` queries the installed Codex catalog and does not guarantee account
+access to every listed model.
+
+To make the plugin discoverable, add this repository as a marketplace:
+
+```text
+codex plugin marketplace add /absolute/path/to/codex-astra-luna-orchestrator
+```
+
+Open the plugin browser in your Codex client, install **Codex Orchestrator**, and
+start a new chat. The plugin exposes `$orchestrate` and local MCP tools that use
+the same task state as the CLI. The CLI must already be on Codex's PATH. Plugin
+installation does not start a runner or install hooks. This is a local plugin;
+no public-directory publication is performed by setup.
+
+See [the runtime guide](guides/dynamic-cli.md) for approvals, model-switch
+semantics, interruption/continuation, state recovery, and development checks.
+
+## Original profile installer
 
 Install a Codex profile with GPT-6 Astra, GPT-6.1 Sol, or GPT-6 Luna as the orchestrator,
 GPT-6 Luna execution subagents, and an independent reviewer.
@@ -38,7 +116,7 @@ the reviewer uses Astra for Pro/Plus and Sol for Sol profiles.
 1. Clone this repository and enter it:
 
    ```sh
-   git clone https://github.com/donvito/codex-astra-luna-orchestrator.git
+   git clone https://github.com/IcaroStumpf/codex-astra-luna-orchestrator.git
    cd codex-astra-luna-orchestrator
    ```
 

@@ -1,4 +1,5 @@
 import shutil
+import os
 import subprocess
 import tempfile
 import tomllib
@@ -18,6 +19,36 @@ PREVIOUS_PROFILES = {
     "pro-max-2-subagents": ("gpt-6-astra", "medium", "max", 2),
     "plus-max-2-subagents": ("gpt-6-luna", "max", "medium", 2),
 }
+
+
+def installer_commands():
+    """Locate the platform installers, including Git Bash on native Windows."""
+    shell = shutil.which("sh")
+    if shell is None and os.name == "nt":
+        git = shutil.which("git")
+        if git:
+            candidate = Path(git).parent.parent / "usr" / "bin" / "sh.exe"
+            if candidate.is_file():
+                shell = str(candidate)
+    commands = [("shell", [shell, str(ROOT / "setup.sh")])] if shell else []
+    if shutil.which("pwsh"):
+        commands.append(("powershell", ["pwsh", "-NoProfile", "-File", str(ROOT / "setup.ps1")]))
+    if not commands:
+        raise unittest.SkipTest("No shell or PowerShell installer runtime is available")
+    return commands
+
+
+def run_installer(installer, command, target, choice):
+    target_input = Path(target).as_posix() if installer == "shell" else target
+    inputs = f"{target_input}\n{choice}\n\n\n\n"
+    env = os.environ.copy()
+    if installer == "shell":
+        env["PATH"] = str(Path(command[0]).parent) + os.pathsep + env.get("PATH", "")
+    # Bytes preserve LF on Windows; text=True would feed CRLF to POSIX read.
+    result = subprocess.run(command, input=inputs.encode("utf-8"), capture_output=True, env=env, timeout=30)
+    result.stdout = result.stdout.decode("utf-8", errors="replace")
+    result.stderr = result.stderr.decode("utf-8", errors="replace")
+    return result
 
 
 class SolProfileTests(unittest.TestCase):
@@ -58,9 +89,7 @@ class SolProfileTests(unittest.TestCase):
                 )
 
     def test_installers_select_profiles(self):
-        installers = [("shell", ["sh", str(ROOT / "setup.sh")])]
-        if shutil.which("pwsh"):
-            installers.append(("powershell", ["pwsh", "-NoProfile", "-File", str(ROOT / "setup.ps1")]))
+        installers = installer_commands()
         choices = (
             ("5", "GPT6-SolMax-LunaMax"),
             ("6", "GPT6-SolMedium-LunaMax"),
@@ -72,9 +101,7 @@ class SolProfileTests(unittest.TestCase):
         for installer, command in installers:
             for choice, profile in choices:
                 with self.subTest(installer=installer, choice=choice), tempfile.TemporaryDirectory() as target:
-                    result = subprocess.run(
-                        command, input=f"{target}\n{choice}\n\n\n\n", text=True, capture_output=True
-                    )
+                    result = run_installer(installer, command, target, choice)
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertIn("Select Profile [1-6] (default 1):", result.stdout)
                     self.assertIn(f"profile: {profile}", result.stdout)
@@ -122,15 +149,11 @@ class PreviousProfileTests(unittest.TestCase):
                 self.assertIn(f"`gpt-6-luna` at `{luna_effort}` reasoning", skill)
 
     def test_installers_select_previous_profiles(self):
-        installers = [("shell", ["sh", str(ROOT / "setup.sh")])]
-        if shutil.which("pwsh"):
-            installers.append(("powershell", ["pwsh", "-NoProfile", "-File", str(ROOT / "setup.ps1")]))
+        installers = installer_commands()
         for installer, command in installers:
             for choice, profile in enumerate(PREVIOUS_PROFILES, start=1):
                 with self.subTest(installer=installer, profile=profile), tempfile.TemporaryDirectory() as target:
-                    result = subprocess.run(
-                        command, input=f"{target}\n{choice}\n\n\n\n", text=True, capture_output=True
-                    )
+                    result = run_installer(installer, command, target, choice)
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertIn(f"profile: {profile}", result.stdout)
                     menu_line = next(line for line in result.stdout.splitlines() if line.startswith(f"  {choice}) "))

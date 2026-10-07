@@ -1,0 +1,20 @@
+{
+  "name": "codex-astra-luna-orchestrator",
+  "interface": {
+    "displayName": "Codex Astra Luna"
+  },
+  "plugins": [
+    {
+      "name": "codex-orchestrator",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

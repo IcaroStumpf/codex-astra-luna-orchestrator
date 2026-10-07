@@ -1,8 +1,34 @@
+# macOS
+.DS_Store
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Dependencies and build output
+node_modules/
+dist/
+build/
+.venv/
+venv/
 __pycache__/
 *.py[cod]
 *.egg-info/
-.venv/
-build/
-dist/
+
+# Logs and temporary files
+*.log
+tmp/
+temp/
 .orchestrator/
 
+# Editor and local tooling files
+/.codex/
+/.agents/*
+!/.agents/plugins/
+/.agents/plugins/*
+!/.agents/plugins/marketplace.json
+.idea/
+.vscode/
+*.swp
+*.swo

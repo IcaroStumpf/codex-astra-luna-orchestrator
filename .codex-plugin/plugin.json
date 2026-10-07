@@ -1,0 +1,36 @@
+{
+  "name": "codex-orchestrator",
+  "version": "0.3.0",
+  "description": "Coordinate durable Codex tasks, configure role-based models, and inspect agent activity.",
+  "author": {
+    "name": "IcaroStumpf"
+  },
+  "homepage": "https://github.com/IcaroStumpf/codex-astra-luna-orchestrator",
+  "repository": "https://github.com/IcaroStumpf/codex-astra-luna-orchestrator",
+  "license": "Apache-2.0",
+  "keywords": [
+    "codex",
+    "agents",
+    "orchestration",
+    "tasks",
+    "models"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Codex Orchestrator",
+    "shortDescription": "Manage durable Codex tasks",
+    "longDescription": "Create and track durable Codex agent tasks, coordinate dependencies and roles, and inspect task events through a local CLI and MCP server installed separately.",
+    "developerName": "IcaroStumpf",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Create and inspect durable tasks",
+      "Configure role and task models",
+      "Review agent status and event history"
+    ],
+    "websiteURL": "https://github.com/IcaroStumpf/codex-astra-luna-orchestrator",
+    "defaultPrompt": [
+      "Use Codex Orchestrator for multi-step work that benefits from durable tasks, dependencies, or progress visibility."
+    ]
+  }
+}

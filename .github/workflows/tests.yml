@@ -1,0 +1,30 @@
+name: Tests
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ['3.11', '3.14']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: interpreter
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run unit and protocol integration tests
+        shell: pwsh
+        env:
+          PYTHONUTF8: '1'
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: "& '${{ steps.interpreter.outputs.python-path }}' -m unittest discover -s tests -v"
+      - name: Build and install package
+        shell: pwsh
+        run: "& '${{ steps.interpreter.outputs.python-path }}' -m pip install ."
+      - name: Verify console entry point
+        shell: pwsh
+        run: codex-orchestrator --help

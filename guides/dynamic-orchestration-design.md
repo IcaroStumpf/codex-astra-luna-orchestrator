@@ -13,8 +13,9 @@ implement inference, handle login tokens, or require a separate OpenAI API key.
   concurrently, and inspect their results. Serialize workspace-writing tasks.
 - View task state, active tools, requested/observed models, usage, pending
   approvals, and native child-agent activity from the terminal or plugin.
-- Change role defaults or a task's model while the runner stays alive. Apply
-  changes at the next turn; show pending changes separately from running work.
+- Change role defaults or a task's model while the runner stays alive. Support
+  next-turn policy and explicit, capability-gated active-turn publication;
+  distinguish requested, published, and observed settings.
 - Interrupt and continue a task using the same Codex thread. Preserve history
   across runner restarts without automatically replaying uncertain work.
 - Offer useful roles with configurable models and reasoning effort. Avoid
@@ -44,12 +45,16 @@ changing managed task policy does not rewrite already-running native children.
 
 ## Model switching boundary
 
-Codex accepts model and effort overrides on `turn/start`. `turn/steer` cannot
-change the model. Policy edits therefore affect queued tasks and subsequent
-turns. Running work keeps its observed model until completion or an explicit
-interrupt. This runtime does not claim to remotely change a separate Codex CLI
-or desktop session. Model listing reports the installed Codex catalog, not a
-guarantee of account access.
+Codex accepts model and effort overrides on `turn/start`. Policy edits affect
+queued tasks and subsequent turns. Codex CLI 0.160.1 additionally exposes the
+experimental `turn/settings/update` method. An explicit live change uses that
+method: `applied` means published for subsequent captures, not retroactive
+replacement of already captured steps or a guarantee of another inference.
+`targetUnavailable` and unsupported methods keep the next-turn policy intact.
+Children and separate Codex CLI/desktop sessions are unaffected. Model listing
+reports the installed Codex catalog, not a guarantee of account access.
+The installed CLI gates this method behind `step_model_switching`; the runner's
+`--live-models` option enables it for the child process only.
 
 ## Evidence and inspiration
 
@@ -58,10 +63,9 @@ guarantee of account access.
 - [Plugin packaging](https://developers.openai.com/plugins/build/plugins):
   portable manifest, skills, MCP, and repository marketplace.
 - [Agent Orchestrator](https://github.com/OrchestratorInc/agent-orchestrator):
-  reference project under evaluation for visible task lifecycle and runtime
-  separation.
-- [oh-my-codex](https://github.com/Yeachan-Heo/oh-my-codex): reference project
-  under evaluation for Codex-native role workflows and terminal visibility.
+  visible task lifecycle, evidence-based status and runtime separation.
+- [oh-my-codex](https://github.com/Yeachan-Heo/oh-my-codex): Codex-native plugin
+  packaging, role policy separate from model choice, and project-local state.
 
-Implementation in this fork is original. Reference findings and their concrete
-influence will be recorded as the integration is verified.
+Implementation in this fork is original. [Reference findings](reference-projects.md)
+record the concrete influence and license attribution.
