@@ -11,10 +11,12 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .roles import EFFORTS, default_roles, validate_model, validate_role
+from .workflows import expand_workflow, validate_definition
 
 ACTIVE = {"running", "waiting_approval", "interrupting"}
 TERMINAL = {"completed", "failed", "interrupted", "lost", "cancelled"}
 STATUSES = ACTIVE | TERMINAL | {"queued", "blocked"}
+SCHEMA_VERSION = 2
 
 
 def now() -> float:
@@ -38,6 +40,20 @@ class Store:
         if self.path.is_symlink():
             raise ValueError("The state database must not be a symbolic link.")
         with self.connect() as db:
+            # Check an existing version before running DDL so a newer database
+            # is rejected without being changed by an older runtime.
+            existing_tables = {row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            version = 1
+            if "settings" in existing_tables:
+                version_row = db.execute(
+                    "SELECT data FROM settings WHERE key='schema_version'").fetchone()
+                if version_row is not None:
+                    version = json.loads(version_row[0])
+                    if not isinstance(version, int) or isinstance(version, bool) or version > SCHEMA_VERSION:
+                        raise ValueError(f"Unsupported state schema {version}; use a compatible runtime.")
+                    if version < 1:
+                        raise ValueError(f"Unsupported state schema {version}; use a compatible runtime.")
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, data TEXT NOT NULL);
@@ -50,12 +66,34 @@ class Store:
                 CREATE TABLE IF NOT EXISTS requests (id TEXT PRIMARY KEY, data TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS controls (id TEXT PRIMARY KEY, data TEXT NOT NULL);
             """)
+            db.execute("INSERT OR IGNORE INTO settings VALUES ('schema_version', '1')")
             for role in default_roles():
                 db.execute("INSERT OR IGNORE INTO roles VALUES (?, ?)", (role["name"], json.dumps(role)))
-            db.execute("INSERT OR IGNORE INTO settings VALUES ('schema_version', '1')")
-            version = json.loads(db.execute("SELECT data FROM settings WHERE key='schema_version'").fetchone()[0])
-            if version != 1:
+            if version == 1:
+                self._migrate_v1_to_v2(db)
+            elif version != SCHEMA_VERSION:
                 raise ValueError(f"Unsupported state schema {version}; use a compatible runtime.")
+
+    @staticmethod
+    def _migrate_v1_to_v2(db):
+        """Add workflow grouping to v1 projects without dropping existing state."""
+
+        if not db.in_transaction:
+            db.execute("BEGIN IMMEDIATE")
+        try:
+            db.execute("CREATE TABLE IF NOT EXISTS workflow_runs (id TEXT PRIMARY KEY, data TEXT NOT NULL)")
+            for row in db.execute("SELECT id, data FROM tasks").fetchall():
+                task = json.loads(row[1])
+                task.setdefault("workflow_id", None)
+                task.setdefault("workflow_step", None)
+                db.execute("UPDATE tasks SET data=? WHERE id=?", (json.dumps(task), row[0]))
+            db.execute("INSERT OR IGNORE INTO settings VALUES ('dispatch', ?)",
+                       (json.dumps({"paused": False}),))
+            db.execute("UPDATE settings SET data=? WHERE key='schema_version'", (json.dumps(2),))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
     @contextmanager
     def connect(self):
@@ -106,26 +144,135 @@ class Store:
             return role
 
     def add_task(self, prompt, role="worker", title=None, depends_on=None, parent_id=None, model=None, effort=None):
+        dependencies = list(dict.fromkeys(depends_on or []))
+        task_id = identifier()
+        task = self._build_task(task_id, prompt, role, title, dependencies, parent_id, model, effort)
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._read(db, "roles", "name", role)
+            for dep in dependencies + ([parent_id] if parent_id else []):
+                self._read(db, "tasks", "id", dep)
+            db.execute("INSERT INTO tasks VALUES (?, ?)", (task["id"], json.dumps(task)))
+            self._event(db, task["id"], "task/created", {"title": task["title"], "role": role})
+        return task
+
+    @staticmethod
+    def _build_task(task_id, prompt, role, title=None, depends_on=None, parent_id=None,
+                    model=None, effort=None, workflow_id=None, workflow_step=None):
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("Task prompt must not be empty.")
         if model is not None:
             validate_model(model)
         if effort is not None and effort not in EFFORTS:
             raise ValueError("Unsupported reasoning effort.")
-        self.get_role(role)
-        dependencies = list(dict.fromkeys(depends_on or []))
-        task = dict(id=identifier(), title=title or prompt.strip().splitlines()[0][:100], prompt=prompt,
-                    role=role, status="queued", depends_on=dependencies, parent_id=parent_id,
+        if not isinstance(role, str) or not role.strip():
+            raise ValueError("Task role must not be empty.")
+        clean_prompt = prompt.strip()
+        task_title = title.strip() if isinstance(title, str) and title.strip() else clean_prompt.splitlines()[0][:100]
+        return dict(id=task_id, title=task_title, prompt=prompt,
+                    role=role, status="queued", depends_on=list(depends_on or []), parent_id=parent_id,
                     model=model, effort=effort, current_model=None, current_effort=None,
                     thread_id=None, turn_id=None, result="", error=None, activity="Queued",
-                    created_at=now(), updated_at=now(), run_id=None)
+                    created_at=now(), updated_at=now(), run_id=None,
+                    workflow_id=workflow_id, workflow_step=workflow_step)
+
+    def submit_workflow(self, definition, goal, name=None):
+        """Atomically create a named workflow run and every task in its DAG."""
+
+        normalized = validate_definition(definition)
+        expanded = expand_workflow(normalized, goal)
+        run_name = normalized["name"] if name is None else name
+        if not isinstance(run_name, str) or not run_name.strip() or len(run_name) > 128:
+            raise ValueError("Workflow run name must contain 1 to 128 characters.")
+        run_name = run_name.strip()
+
+        workflow_id = identifier()
+        task_ids = {step["key"]: identifier() for step in expanded["tasks"]}
+        task_records = []
+        for step in expanded["tasks"]:
+            dependencies = [task_ids[key] for key in step["depends_on"]]
+            task_records.append(self._build_task(
+                task_ids[step["key"]], step["prompt"], step["role"], step["title"], dependencies,
+                model=step.get("model"), effort=step.get("effort"),
+                workflow_id=workflow_id, workflow_step=step["key"],
+            ))
+        created = now()
+        run = {
+            "id": workflow_id,
+            "name": run_name,
+            "definition_name": normalized["name"],
+            "definition": normalized,
+            "goal": goal.strip(),
+            "task_ids": [task_ids[step["key"]] for step in expanded["tasks"]],
+            "by_key": task_ids,
+            "created_at": created,
+            "updated_at": created,
+        }
+
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            for dep in dependencies + ([parent_id] if parent_id else []):
-                self._read(db, "tasks", "id", dep)
-            db.execute("INSERT INTO tasks VALUES (?, ?)", (task["id"], json.dumps(task)))
-            self._event(db, task["id"], "task/created", {"title": task["title"], "role": role})
-        return task
+            # Resolve roles again inside the write transaction, then write all
+            # records/events together so a malformed graph can never leave a
+            # partial runnable workflow behind.
+            for step in expanded["tasks"]:
+                self._read(db, "roles", "name", step["role"])
+            db.execute("INSERT INTO workflow_runs VALUES (?, ?)", (workflow_id, json.dumps(run)))
+            for task in task_records:
+                db.execute("INSERT INTO tasks VALUES (?, ?)", (task["id"], json.dumps(task)))
+                self._event(db, task["id"], "task/created", {
+                    "title": task["title"], "role": task["role"],
+                    "workflow_id": workflow_id, "workflow_step": task["workflow_step"],
+                })
+            self._event(db, None, "workflow/submitted", {
+                "workflow_id": workflow_id, "name": run_name,
+                "definition_name": normalized["name"], "task_count": len(task_records),
+            })
+        return self.get_workflow_run(workflow_id)
+
+    def workflow_runs(self):
+        with self.connect() as db:
+            runs = [json.loads(row[0]) for row in db.execute("SELECT data FROM workflow_runs ORDER BY rowid")]
+            tasks = [json.loads(row[0]) for row in db.execute("SELECT data FROM tasks ORDER BY rowid")]
+        tasks_by_workflow = {}
+        for task in tasks:
+            workflow_id = task.get("workflow_id")
+            if workflow_id is not None:
+                tasks_by_workflow.setdefault(workflow_id, []).append(task)
+        return [self._workflow_detail(run, tasks_by_workflow.get(run["id"], [])) for run in runs]
+
+    def get_workflow_run(self, workflow_id):
+        with self.connect() as db:
+            run = self._read(db, "workflow_runs", "id", workflow_id)
+            tasks = [json.loads(row[0]) for row in db.execute("SELECT data FROM tasks ORDER BY rowid")]
+        tasks = [task for task in tasks if task.get("workflow_id") == workflow_id]
+        return self._workflow_detail(run, tasks)
+
+    @staticmethod
+    def _workflow_detail(run, all_tasks):
+        task_by_id = {task["id"]: task for task in all_tasks}
+        tasks = [task_by_id[task_id] for task_id in run.get("task_ids", []) if task_id in task_by_id]
+        statuses = {task["status"] for task in tasks}
+        if tasks and statuses == {"completed"}:
+            status = "completed"
+        elif "failed" in statuses:
+            status = "failed"
+        elif "lost" in statuses:
+            status = "lost"
+        elif "interrupted" in statuses:
+            status = "interrupted"
+        elif "cancelled" in statuses:
+            status = "cancelled"
+        elif "waiting_approval" in statuses:
+            status = "waiting_approval"
+        elif statuses & {"running", "interrupting"}:
+            status = "running"
+        elif "queued" in statuses:
+            status = "queued"
+        elif "blocked" in statuses:
+            status = "blocked"
+        else:
+            status = "queued"
+        return {**run, "status": status, "tasks": tasks}
 
     def tasks(self):
         return self._list("tasks")
@@ -155,6 +302,13 @@ class Store:
         """Claim only still-runnable work, atomically against CLI cancellation."""
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            dispatch_row = db.execute("SELECT data FROM settings WHERE key='dispatch'").fetchone()
+            if dispatch_row is not None:
+                dispatch = json.loads(dispatch_row[0])
+                if not isinstance(dispatch, dict) or type(dispatch.get("paused", False)) is not bool:
+                    raise ValueError("Dispatch settings must be an object with a boolean paused field.")
+                if dispatch.get("paused", False):
+                    return None
             task = self._read(db, "tasks", "id", task_id)
             if task["status"] not in {"queued", "blocked"}:
                 return None
@@ -336,8 +490,13 @@ class Store:
         if runner:
             runner["heartbeat_age"] = max(0, now() - runner.get("heartbeat", 0))
             runner["observation"] = "recent heartbeat" if runner["heartbeat_age"] < 10 else "stale heartbeat; liveness unknown"
+        workflow_summaries = [
+            {key: run[key] for key in ("id", "name", "definition_name", "status", "task_ids", "created_at")}
+            for run in self.workflow_runs()
+        ]
         return dict(project=str(self.project), runner=runner, tasks=tasks, agents=self.agents(),
-                    requests=self.requests("pending"), roles=self.roles())
+                    requests=self.requests("pending"), roles=self.roles(),
+                    dispatch=self.get_setting("dispatch", {"paused": False}), workflows=workflow_summaries)
 
 
 class RunnerLock:

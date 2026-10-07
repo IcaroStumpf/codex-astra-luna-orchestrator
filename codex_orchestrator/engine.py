@@ -131,6 +131,7 @@ class Engine:
             }
             self._recover_active_tasks()
             self._expire_old_requests()
+            self._expire_old_controls()
             self._set_runner("starting")
 
             try:
@@ -213,6 +214,26 @@ class Engine:
             self.store.update_request(request["id"], status="expired", expired_at=time.time())
             self.store.event(request.get("task_id"), "request/expired", {"request_id": request["id"], "reason": "previous_runner"})
 
+    def _expire_old_controls(self) -> None:
+        """Never replay a control whose result may have been lost with a runner."""
+
+        for control in self.store.controls():
+            if control.get("status") not in {"pending", "sending"}:
+                continue
+            if control.get("run_id") == self.run_id:
+                continue
+            uncertain = control.get("status") == "sending"
+            status = "uncertain" if uncertain else "expired"
+            self.store.update_control(
+                control["id"], status=status, completed_at=time.time(),
+                reason="previous_runner",
+            )
+            self.store.event(
+                control.get("task_id"),
+                "control/uncertain" if uncertain else "control/expired",
+                {"control_id": control["id"], "kind": control.get("kind"), "reason": "previous_runner"},
+            )
+
     def _refresh_models(self) -> None:
         models = []
         cursor = None
@@ -288,8 +309,10 @@ class Engine:
         ]
 
     def _has_work(self) -> bool:
+        dispatch = self.store.get_setting("dispatch", {}) or {}
+        dispatch_paused = bool(dispatch.get("paused")) if isinstance(dispatch, Mapping) else False
         return any(
-            task.get("status") == "queued"
+            (task.get("status") == "queued" and not dispatch_paused)
             or (task.get("status") in ACTIVE and task.get("run_id") == self.run_id)
             for task in self.store.tasks()
         ) or bool(self._active_native_agents())
@@ -301,6 +324,10 @@ class Engine:
             except ValueError:
                 continue
             if task.get("status") != "completed":
+                return 1
+        dispatch = self.store.get_setting("dispatch", {}) or {}
+        if isinstance(dispatch, Mapping) and dispatch.get("paused"):
+            if any(task.get("status") in {"queued", "blocked"} for task in self.store.tasks()):
                 return 1
         return 0
 
@@ -386,6 +413,9 @@ class Engine:
                 continue
         writer_active = any(task.get("current_sandbox") == "workspace-write" for task in owner_tasks)
         if len(active) >= self.max_workers:
+            return
+        dispatch = self.store.get_setting("dispatch", {}) or {}
+        if isinstance(dispatch, Mapping) and dispatch.get("paused"):
             return
         ready = self._ready_tasks()
         if not ready:
@@ -548,6 +578,14 @@ class Engine:
                 continue
 
             kind = control.get("kind")
+            if kind == "steer" and task.get("status") == "interrupting":
+                self.store.update_control(
+                    control["id"], status="expired", completed_at=time.time(), reason="task_interrupting",
+                )
+                self.store.event(task["id"], "control/expired", {
+                    "control_id": control["id"], "kind": kind, "reason": "task_interrupting",
+                })
+                continue
             if not task.get("thread_id"):
                 # The task is still creating/resuming its thread. Keep the
                 # interrupt until dispatch has either produced a turn ID or
@@ -568,16 +606,90 @@ class Engine:
                     self.store.update_task(task["id"], live_update_status="targetUnavailable")
                 continue
             elif control.get("turn_id") != task.get("turn_id"):
-                self.store.update_control(control["id"], status="expired", completed_at=time.time())
+                self.store.update_control(control["id"], status="expired", completed_at=time.time(), reason="stale_turn")
+                self.store.event(task["id"], "control/expired", {
+                    "control_id": control["id"], "kind": kind, "reason": "stale_turn",
+                })
+                continue
+
+            if kind == "steer" and control.get("thread_id") != task.get("thread_id"):
+                self.store.update_control(control["id"], status="expired", completed_at=time.time(), reason="stale_thread")
+                self.store.event(task["id"], "control/expired", {
+                    "control_id": control["id"], "kind": kind, "reason": "stale_thread",
+                })
                 continue
 
             if kind == "interrupt":
                 self._send_interrupt(control, task)
             elif kind == "model":
                 self._publish_live_model(control, task)
+            elif kind == "steer":
+                self._send_steer(control, task)
             else:
                 self.store.update_control(control["id"], status="unsupported", completed_at=time.time())
                 self.store.event(task["id"], "control/unsupported", {"kind": control.get("kind")})
+
+    def _send_steer(self, control: dict[str, Any], task: dict[str, Any]) -> None:
+        prompt = control.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            message = "Steering control is missing its text input."
+            self.store.update_control(control["id"], status="rejected", error=message, completed_at=time.time())
+            self.store.event(task["id"], "task/steer_rejected", {
+                "control_id": control["id"], "turn_id": task.get("turn_id"), "message": message,
+            })
+            return
+
+        self.store.update_control(control["id"], status="sending", started_at=time.time())
+        params = {
+            "threadId": task["thread_id"],
+            "expectedTurnId": control["turn_id"],
+            "input": [{"type": "text", "text": prompt}],
+        }
+        try:
+            response = self.server.request("turn/steer", params)
+        except RpcError as exc:
+            uncertain = exc.code is None
+            status = "uncertain" if uncertain else "rejected"
+            message = _error_message(exc)
+            self.store.update_control(
+                control["id"], status=status, error=message, completed_at=time.time(),
+            )
+            self.store.event(
+                task["id"], "task/steer_uncertain" if uncertain else "task/steer_rejected",
+                {"control_id": control["id"], "turn_id": task.get("turn_id"), "message": message},
+            )
+            return
+        except Exception as exc:
+            message = _error_message(exc)
+            self.store.update_control(
+                control["id"], status="uncertain", error=message, completed_at=time.time(),
+            )
+            self.store.event(task["id"], "task/steer_uncertain", {
+                "control_id": control["id"], "turn_id": task.get("turn_id"), "message": message,
+            })
+            return
+
+        response_turn_id = response.get("turnId") if isinstance(response, Mapping) else None
+        if not isinstance(response_turn_id, str) or response_turn_id != control["turn_id"]:
+            message = "Codex app-server did not confirm that the expected turn accepted the steering input."
+            self.store.update_control(
+                control["id"], status="uncertain", error=message, completed_at=time.time(),
+            )
+            self.store.event(task["id"], "task/steer_uncertain", {
+                "control_id": control["id"], "turn_id": task.get("turn_id"), "message": message,
+            })
+            return
+
+        self.store.update_control(
+            control["id"], status="sent", response_turn_id=response_turn_id,
+            error=None, completed_at=time.time(),
+        )
+        self.store.event(task["id"], "task/steer_sent", {
+            "control_id": control["id"],
+            "turn_id": task.get("turn_id"),
+            "response_turn_id": response_turn_id,
+            "accepted": True,
+        })
 
     def _send_interrupt(self, control: dict[str, Any], task: dict[str, Any]) -> None:
         try:

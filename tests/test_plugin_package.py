@@ -2,6 +2,7 @@ import json
 import tomllib
 import unittest
 from pathlib import Path
+from codex_orchestrator import __version__
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,7 +19,7 @@ class PluginPackageTests(unittest.TestCase):
         codex = read_json(ROOT / ".codex-plugin" / "plugin.json")
 
         self.assertEqual(project["name"], "codex-orchestrator")
-        self.assertEqual(project["version"], "0.3.0")
+        self.assertEqual(project["version"], __version__)
         self.assertEqual(project["scripts"]["codex-orchestrator"], "codex_orchestrator.cli:main")
         self.assertEqual((portable["name"], portable["version"]), (project["name"], project["version"]))
         self.assertEqual((codex["name"], codex["version"]), (portable["name"], portable["version"]))

@@ -19,6 +19,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from . import __version__
+
 
 _MAX_LINE_BYTES = 4 * 1024 * 1024
 _STDERR_TAIL_BYTES = 64 * 1024
@@ -165,7 +167,7 @@ class AppServer:
                     {
                         "clientInfo": {
                             "name": "codex_orchestrator",
-                            "version": "0.3.0",
+                            "version": __version__,
                         },
                         "capabilities": {"experimentalApi": True},
                     },

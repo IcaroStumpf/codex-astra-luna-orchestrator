@@ -20,9 +20,12 @@ def string(description):
 
 
 PROJECT = string("Absolute path to the existing target project directory")
+FILTERS = {"task_id": string("Managed task ID"), "workflow_id": string("Workflow execution ID"),
+           "role": string("Managed role name"), "states": {"type": "array", "items": {"type": "string"}},
+           "active_only": {"type": "boolean"}}
 DEFINITIONS = [
     ("orchestrator_status", "Inspect managed tasks, native child activity, model policy and pending requests.", True,
-     {"project": PROJECT}, ["project"]),
+     {"project": PROJECT, **FILTERS}, ["project"]),
     ("orchestrator_roles", "Read current role instructions and model defaults before delegating.", True,
      {"project": PROJECT}, ["project"]),
     ("orchestrator_task", "Read a task's result, thread ID, status and recent events.", True,
@@ -42,6 +45,26 @@ DEFINITIONS = [
      {"project": PROJECT, "task_id": string("Task ID"), "prompt": string("Continuation instructions")}, ["project", "task_id", "prompt"]),
     ("orchestrator_interrupt_task", "Request interruption of an active task, or cancel work not yet dispatched.", False,
      {"project": PROJECT, "task_id": string("Task ID")}, ["project", "task_id"]),
+    ("orchestrator_steer_task", "Queue additional input for the current active turn. It never starts a continuation or changes model policy.", False,
+     {"project": PROJECT, "task_id": string("Task ID"), "prompt": string("Additional requirement or correction")},
+     ["project", "task_id", "prompt"]),
+    ("orchestrator_dispatch", "Pause or resume admission of new tasks. Active turns and approval handling continue.", False,
+     {"project": PROJECT, "paused": {"type": "boolean"}}, ["project", "paused"]),
+    ("orchestrator_workflow_templates", "Inspect built-in feature, bugfix and review task graphs before submitting.", True,
+     {"project": PROJECT}, ["project"]),
+    ("orchestrator_submit_workflow", "Atomically queue a reusable dependency graph; the separate project runner executes it.", False,
+     {"project": PROJECT, "source": string("Built-in template name or absolute path to a JSON workflow"),
+      "goal": string("Concrete objective and constraints"), "name": string("Optional human-readable execution label")},
+     ["project", "source", "goal"]),
+    ("orchestrator_workflows", "List durable workflow executions and their current aggregate status.", True,
+     {"project": PROJECT}, ["project"]),
+    ("orchestrator_workflow", "Read a workflow execution and all of its member tasks and results.", True,
+     {"project": PROJECT, "workflow_id": string("Workflow execution ID")}, ["project", "workflow_id"]),
+    ("orchestrator_usage", "Inspect reported thread token usage, with managed and native totals kept separate and missing coverage labeled.", True,
+     {"project": PROJECT, **FILTERS}, ["project"]),
+    ("orchestrator_report", "Build a local evidence report with task results, native agents, controls and recent history. No file is written.", True,
+     {"project": PROJECT, "task_id": string("Optional managed task ID"), "workflow_id": string("Optional workflow ID")},
+     ["project"]),
 ]
 
 TOOLS = [{"name": name, "description": description,
@@ -73,12 +96,24 @@ def validate_arguments(name, args):
 def call_tool(name, args):
     validate_arguments(name, args)
     store = Store(args["project"])
-    if name == "orchestrator_status":
-        return store.snapshot()
+    if name in ("orchestrator_status", "orchestrator_usage"):
+        from .views import filter_snapshot, usage_report
+        from .store import STATUSES
+        if args.get("task_id"):
+            store.get_task(args["task_id"])
+        if args.get("workflow_id"):
+            store.get_workflow_run(args["workflow_id"])
+        if args.get("role"):
+            store.get_role(args["role"])
+        if set(args.get("states", [])) - STATUSES:
+            raise ValueError("Unknown task status in states.")
+        snapshot = filter_snapshot(store.snapshot(), **{k: v for k, v in args.items() if k != "project"})
+        return usage_report(snapshot) if name == "orchestrator_usage" else snapshot
     if name == "orchestrator_roles":
         return {"roles": store.roles()}
     if name == "orchestrator_task":
-        return {"task": store.get_task(args["task_id"]), "events": store.events(args["task_id"])}
+        return {"task": store.get_task(args["task_id"]), "events": store.events(args["task_id"]),
+                "controls": [c for c in store.controls() if c.get("task_id") == args["task_id"]][-100:]}
     if name == "orchestrator_add_task":
         return {"task": store.add_task(**{k: v for k, v in args.items() if k != "project"}),
                 "dispatch": "Queued; codex-orchestrator serve must be running in this project."}
@@ -96,6 +131,31 @@ def call_tool(name, args):
         return {"task": store.continue_task(args["task_id"], args["prompt"])}
     if name == "orchestrator_interrupt_task":
         return {"task": store.interrupt_task(args["task_id"])}
+    if name == "orchestrator_steer_task":
+        from .controls import steer_task
+        return {"control": steer_task(store, args["task_id"], args["prompt"]),
+                "effect": "Queued for the current turn only; inspect task controls/events for delivery outcome."}
+    if name == "orchestrator_dispatch":
+        from .controls import set_dispatch
+        return {"dispatch": set_dispatch(store, args["paused"])}
+    if name == "orchestrator_workflow_templates":
+        from .workflows import templates
+        return {"templates": templates()}
+    if name == "orchestrator_submit_workflow":
+        from .workflows import templates, load_definition
+        if args["source"] not in {t["name"] for t in templates()} and not Path(args["source"]).is_absolute():
+            raise ValueError("A workflow file source must be an absolute path.")
+        return {"workflow": store.submit_workflow(load_definition(args["source"]), args["goal"], args.get("name")),
+                "dispatch": "Queued; codex-orchestrator serve must be running in this project."}
+    if name == "orchestrator_workflows":
+        return {"workflows": store.workflow_runs()}
+    if name == "orchestrator_workflow":
+        return {"workflow": store.get_workflow_run(args["workflow_id"])}
+    if name == "orchestrator_report":
+        from .views import build_report
+        if args.get("task_id") and args.get("workflow_id"):
+            raise ValueError("Choose either task_id or workflow_id for a report.")
+        return build_report(store, task_id=args.get("task_id"), workflow_id=args.get("workflow_id"))
     raise ValueError(f"Unknown tool: {name}")
 
 

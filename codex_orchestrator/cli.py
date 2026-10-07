@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import __version__
 from .roles import EFFORTS, validate_role
-from .store import Store
+from .store import Store, STATUSES, TERMINAL, ACTIVE
 
 
 def clean(value):
@@ -58,6 +58,8 @@ def render_status(snapshot):
             print(f"  {clean(runner['error'])}")
     else:
         print("Runner: not started. Run codex-orchestrator serve in another terminal.")
+    if snapshot.get("dispatch", {}).get("paused"):
+        print("Dispatch: PAUSED. Active work continues; use queue resume to admit new tasks.")
     table(["TASK", "ROLE", "STATE", "TURN MODEL", "OBJECTIVE"], [
         [t["id"], t["role"], t["status"], t["next_model"] if t["status"] in {"queued", "blocked"} else t["current_model"], t["title"]]
         for t in snapshot["tasks"]])
@@ -85,6 +87,82 @@ def render_status(snapshot):
             for a in children])
     if snapshot["requests"]:
         print(f"\n{len(snapshot['requests'])} pending request(s). Use approvals, then respond ID.")
+
+
+def add_filters(command, *, display=False):
+    command.add_argument("--task", help="Show one managed task and its observed native agents")
+    command.add_argument("--workflow", help="Filter by workflow execution ID")
+    command.add_argument("--role", help="Filter managed tasks by role")
+    command.add_argument("--state", action="append", choices=sorted(STATUSES), help="Repeat to include several states")
+    command.add_argument("--active", action="store_true", help="Only running, waiting or interrupting tasks")
+    if display:
+        command.add_argument("--tree", action="store_true", help="Show managed and native parent/child relationships")
+    command.add_argument("--json", action="store_true")
+
+
+def selected_snapshot(store, args):
+    from .views import filter_snapshot
+    if getattr(args, "task", None):
+        store.get_task(args.task)
+    if getattr(args, "workflow", None):
+        store.get_workflow_run(args.workflow)
+    if getattr(args, "role", None):
+        store.get_role(args.role)
+    return filter_snapshot(store.snapshot(), task_id=getattr(args, "task", None),
+                           workflow_id=getattr(args, "workflow", None), role=getattr(args, "role", None),
+                           states=getattr(args, "state", None), active_only=getattr(args, "active", False))
+
+
+def display_snapshot(snapshot, *, as_json=False, tree=False):
+    if as_json:
+        emit(snapshot)
+    elif tree:
+        from .views import render_tree
+        print(render_tree(snapshot))
+    else:
+        render_status(snapshot)
+
+
+def render_usage(report):
+    coverage = report["coverage"]
+    print(f"Reported usage: {coverage['reported']}/{coverage['threads']} threads; {coverage['missing']} unknown")
+    table(["KIND", "TASK / THREAD", "ROLE", "INPUT", "CACHED", "OUTPUT", "TOTAL"], [
+        [row["kind"], row.get("task_id") if row["kind"] == "managed" else row.get("thread_id"),
+         row.get("role"), *[row["total"].get(key) for key in
+         ("input_tokens", "cached_input_tokens", "output_tokens", "total_tokens")]]
+        for row in report["threads"]])
+    for kind, group in coverage["by_kind"].items():
+        total = group["reported_total_sums"].get("total_tokens")
+        contributing = group["metric_coverage"].get("total_tokens", 0)
+        print(f"{kind}: {clean(total)} reported total tokens ({contributing}/{group['threads']} threads contributing)")
+    print(clean(report["note"]))
+
+
+def wait_for(store, task_id=None, workflow_id=None, timeout=300, interval=0.5):
+    """Observe persisted work; never launch inference or answer an approval."""
+    if not math.isfinite(timeout) or timeout < 0 or not math.isfinite(interval) or interval < 0.1:
+        raise ValueError("Timeout must be finite and nonnegative; interval must be at least 0.1.")
+    deadline = time.monotonic() + timeout
+    while True:
+        value = store.get_task(task_id) if task_id else store.get_workflow_run(workflow_id)
+        tasks = [value] if task_id else value["tasks"]
+        ids = {t["id"] for t in tasks}
+        pending = [r for r in store.requests("pending") if r.get("task_id") in ids]
+        if pending:
+            return 3, {"outcome": "needs_input", "requests": pending, "task" if task_id else "workflow": value}
+        statuses = {task["status"] for task in tasks}
+        if statuses <= {"completed"}:
+            return 0, {"outcome": "completed", "task" if task_id else "workflow": value}
+        if all(status in TERMINAL or status == "blocked" for status in statuses):
+            return 1, {"outcome": "incomplete", "task" if task_id else "workflow": value}
+        if store.get_setting("dispatch", {}).get("paused") and not statuses & ACTIVE:
+            failed = bool(statuses & (TERMINAL - {"completed"}))
+            return (1 if failed else 4), {"outcome": "incomplete" if failed else "paused",
+                                         "task" if task_id else "workflow": value}
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return 124, {"outcome": "timeout", "task" if task_id else "workflow": value}
+        time.sleep(min(interval, remaining))
 
 
 def parser():
@@ -118,20 +196,48 @@ def parser():
     add.add_argument("--parent")
     add.add_argument("--model")
     add.add_argument("--effort", choices=EFFORTS)
-    for action in ("show", "interrupt", "continue", "model"):
+    for action in ("show", "interrupt", "continue", "model", "steer", "wait"):
         item = task.add_parser(action)
         item.add_argument("id")
-        if action == "continue":
+        if action in ("continue", "steer"):
             item.add_argument("prompt")
+        if action == "wait":
+            item.add_argument("--timeout", type=float, default=300, help="Seconds to observe; 0 checks once")
+            item.add_argument("--interval", type=float, default=0.5)
         if action == "model":
             item.add_argument("model")
             item.add_argument("--effort", choices=EFFORTS)
             item.add_argument("--live", action="store_true", help="Also request experimental active-turn publication")
-    commands.add_parser("status", help="Show the task board").add_argument("--json", action="store_true")
+    add_filters(commands.add_parser("status", help="Show the task board"), display=True)
     watch = commands.add_parser("watch", help="Refresh the task board until Ctrl+C")
     watch.add_argument("--interval", type=float, default=1)
-    watch.add_argument("--json", action="store_true", help="Emit one JSON snapshot per line")
+    add_filters(watch, display=True)
     watch.add_argument("--count", type=int, help="Stop after this many snapshots")
+    add_filters(commands.add_parser("agents", help="Inspect the managed/native agent tree"))
+    add_filters(commands.add_parser("usage", help="Inspect reported thread tokens and coverage"))
+    report = commands.add_parser("report", help="Export local task/workflow results and lifecycle evidence")
+    scope = report.add_mutually_exclusive_group()
+    scope.add_argument("--task")
+    scope.add_argument("--workflow")
+    report.add_argument("--format", choices=("json", "markdown"), default="markdown")
+    report.add_argument("--output", type=Path, help="Create a new report file; defaults to stdout")
+    report.add_argument("--force", action="store_true", help="Allow overwriting the chosen report path")
+    queue = commands.add_parser("queue", help="Pause or resume admission; active work continues").add_subparsers(dest="action", required=True)
+    for action in ("pause", "resume", "status"):
+        queue.add_parser(action)
+    workflow = commands.add_parser("workflow", help="Reusable dependency workflows and their executions").add_subparsers(dest="action", required=True)
+    workflow.add_parser("templates", help="List built-in definitions with their task graphs")
+    workflow.add_parser("list", help="List durable workflow executions").add_argument("--json", action="store_true")
+    submit = workflow.add_parser("submit", help="Atomically queue a built-in or JSON workflow")
+    submit.add_argument("source", help="Built-in template name or JSON file path")
+    submit.add_argument("goal", help="Concrete objective to inject as data into every step")
+    submit.add_argument("--name", help="Human-readable execution label")
+    submit.add_argument("--dry-run", action="store_true", help="Validate and show the graph without queuing tasks")
+    workflow.add_parser("show", help="Show workflow state and every member task").add_argument("id")
+    workflow_wait = workflow.add_parser("wait", help="Wait for completion, failure, required input or timeout")
+    workflow_wait.add_argument("id")
+    workflow_wait.add_argument("--timeout", type=float, default=300)
+    workflow_wait.add_argument("--interval", type=float, default=0.5)
     events = commands.add_parser("events", help="Read recent persisted lifecycle events")
     events.add_argument("--task")
     events.add_argument("--after", type=int, help="Event cursor; 0 starts at the first event (omitted: recent window)")
@@ -236,25 +342,83 @@ def execute(args):
             emit(store.continue_task(args.id, args.prompt))
         elif args.action == "interrupt":
             emit(store.interrupt_task(args.id))
+        elif args.action == "steer":
+            from .controls import steer_task
+            emit(steer_task(store, args.id, args.prompt))
+        elif args.action == "wait":
+            code, result = wait_for(store, task_id=args.id, timeout=args.timeout, interval=args.interval)
+            emit(result)
+            return code
         elif args.action == "model":
             emit(store.set_task_model(args.id, args.model, args.effort, live=args.live))
             print("Live request queued; inspect status/events for publication outcome." if args.live else "Model saved for the next turn.")
     elif args.command == "status":
-        (emit if args.json else render_status)(store.snapshot())
+        display_snapshot(selected_snapshot(store, args), as_json=args.json, tree=args.tree)
     elif args.command == "watch":
         if not math.isfinite(args.interval) or args.interval < 0.1 or (args.count is not None and args.count < 1):
             raise ValueError("Interval must be >=0.1 and count must be positive.")
         count = 0
         while args.count is None or count < args.count:
+            snapshot = selected_snapshot(store, args)
             if args.json:
-                print(json.dumps(store.snapshot(), ensure_ascii=False), flush=True)
+                print(json.dumps(snapshot, ensure_ascii=False), flush=True)
             else:
                 if sys.stdout.isatty():
                     print("\033[2J\033[H", end="")
-                render_status(store.snapshot())
+                display_snapshot(snapshot, tree=args.tree)
             count += 1
             if args.count is None or count < args.count:
                 time.sleep(args.interval)
+    elif args.command == "agents":
+        display_snapshot(selected_snapshot(store, args), as_json=args.json, tree=True)
+    elif args.command == "usage":
+        from .views import usage_report
+        (emit if args.json else render_usage)(usage_report(selected_snapshot(store, args)))
+    elif args.command == "report":
+        from .views import build_report, render_report_markdown
+        report = build_report(store, task_id=args.task, workflow_id=args.workflow)
+        output = json.dumps(report, ensure_ascii=False, indent=2) if args.format == "json" else render_report_markdown(report)
+        if args.output:
+            with args.output.expanduser().open("w" if args.force else "x", encoding="utf-8", newline="\n") as target:
+                target.write(output.rstrip() + "\n")
+            print(f"Report written to {args.output.expanduser().resolve()}")
+        else:
+            print(output)
+    elif args.command == "queue":
+        from .controls import set_dispatch
+        emit(store.get_setting("dispatch", {"paused": False}) if args.action == "status"
+             else set_dispatch(store, paused=args.action == "pause"))
+    elif args.command == "workflow":
+        from .workflows import templates, load_definition, validate_definition, expand_workflow
+        if args.action == "templates":
+            emit(templates())
+        elif args.action == "list":
+            runs = store.workflow_runs()
+            if args.json:
+                emit(runs)
+            else:
+                table(["WORKFLOW", "NAME", "TEMPLATE", "STATE", "DONE"], [
+                    [run["id"], run["name"], run["definition_name"], run["status"],
+                     f"{sum(t['status'] == 'completed' for t in run['tasks'])}/{len(run['tasks'])}"]
+                    for run in runs])
+        elif args.action == "show":
+            emit(store.get_workflow_run(args.id))
+        elif args.action == "wait":
+            code, result = wait_for(store, workflow_id=args.id, timeout=args.timeout, interval=args.interval)
+            emit(result)
+            return code
+        elif args.action == "submit":
+            definition = validate_definition(load_definition(args.source))
+            if args.dry_run:
+                expanded = expand_workflow(definition, args.goal)
+                for step in expanded["tasks"]:
+                    store.get_role(step["role"])
+                if args.name is not None and (not args.name.strip() or len(args.name) > 128):
+                    raise ValueError("Workflow name must have 1–128 characters.")
+                emit({"definition": definition, "tasks": expanded["tasks"], "goal": args.goal,
+                      "name": args.name, "dispatch": "preview only"})
+            else:
+                emit(store.submit_workflow(definition, args.goal, args.name))
     elif args.command == "events":
         emit(store.events(args.task, args.after, args.limit))
     elif args.command == "approvals":

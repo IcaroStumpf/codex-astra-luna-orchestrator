@@ -5,6 +5,24 @@ Scripts/bin directory. Prefix a command with `--project /absolute/project`
 when you are not in the target project. Windows paths work without translation.
 Do not use this repository itself as the target of an installer smoke test.
 
+The [README](../README.md) includes the full installation and usage walkthrough,
+role catalog, live-model explanation, controls, report export and wait exit codes.
+See [workflows](workflows.md) for built-in teams and custom JSON graphs.
+
+## Steering and dispatch
+
+`task steer ID "Additional instruction"` targets exactly the current managed
+run, thread and turn. Codex's `turn/steer` requires `expectedTurnId`; an expired
+target, rejected turn kind, or uncertain transport outcome is recorded without
+replaying the instruction into a later continuation. Some turn kinds, such as
+review or compact, are not steerable. Use `events --task ID` to inspect delivery.
+
+`queue pause` persists a stop on new claims; `queue resume` lifts it. Active work
+and pending control/approval handling continue. `serve --once` exits nonzero when
+the remaining queue is paused; continuous `serve` waits for resumption. The pause
+is checked inside the claim transaction so a stale scheduler observation cannot
+claim work after a committed pause.
+
 ## Tasks and agents
 
 A **managed task** is a bounded assignment backed by a Codex conversation

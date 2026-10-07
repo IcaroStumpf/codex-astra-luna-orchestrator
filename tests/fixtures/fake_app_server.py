@@ -7,6 +7,7 @@ import os
 import sys
 import threading
 import time
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,8 @@ _stdout_lock = threading.Lock()
 _state_lock = threading.Lock()
 _server_responses: list[dict[str, Any]] = []
 _workers: list[threading.Thread] = []
+_project_root = Path(__file__).resolve().parents[2]
+_client_version = tomllib.loads((_project_root / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
 
 
 def send(message: dict[str, Any]) -> None:
@@ -50,6 +53,7 @@ def _orchestration_server(args: list[str]) -> None:
         trace_path = Path(args[args.index("--trace") + 1])
     hold_for_approval = "--approval" in args
     exit_on_turn_start = "--exit-on-turn-start" in args
+    hold_first_turn_for_steer = "--hold-for-steer" in args
     threads = 0
     turns = 0
     active_turns: dict[str, str] = {}
@@ -63,7 +67,7 @@ def _orchestration_server(args: list[str]) -> None:
 
         if method == "initialize":
             expected = {
-                "clientInfo": {"name": "codex_orchestrator", "version": "0.3.0"},
+                "clientInfo": {"name": "codex_orchestrator", "version": _client_version},
                 "capabilities": {"experimentalApi": True},
             }
             if params != expected:
@@ -97,6 +101,10 @@ def _orchestration_server(args: list[str]) -> None:
                 send({"id": "fixture-approval-1", "method": "item/commandExecution/requestApproval", "params": {
                     "threadId": thread_id, "turnId": turn_id, "command": ["fixture", "approval"],
                 }})
+            elif hold_first_turn_for_steer and turns == 1:
+                # Keep the first task active so a separate CLI process can
+                # submit an exact-turn `turn/steer` control.
+                continue
             else:
                 result = f"fixture result for {turn_id}"
                 send({"method": "item/completed", "params": {
@@ -108,6 +116,30 @@ def _orchestration_server(args: list[str]) -> None:
                 }})
         elif method == "turn/settings/update":
             send({"id": request_id, "result": {"status": "applied"}})
+        elif method == "turn/steer":
+            thread_id = params.get("threadId")
+            expected_turn_id = params.get("expectedTurnId")
+            active_turn_id = active_turns.get(thread_id)
+            if not active_turn_id or expected_turn_id != active_turn_id:
+                send({"id": request_id, "error": {
+                    "code": -32004,
+                    "message": "The expected turn is not the active turn for this thread.",
+                }})
+            else:
+                send({"id": request_id, "result": {"turnId": active_turn_id}})
+                text = " ".join(
+                    item.get("text", "") for item in params.get("input", [])
+                    if isinstance(item, dict) and item.get("type") == "text"
+                )
+                send({"method": "item/completed", "params": {
+                    "threadId": thread_id, "turnId": active_turn_id,
+                    "item": {"id": f"message-{active_turn_id}", "type": "agentMessage",
+                             "phase": "final_answer", "text": f"fixture steered result: {text}"},
+                }})
+                send({"method": "turn/completed", "params": {
+                    "threadId": thread_id, "turn": {"id": active_turn_id, "status": "completed"},
+                }})
+                active_turns.pop(thread_id, None)
         elif method == "turn/interrupt":
             send({"id": request_id, "result": {}})
         elif method is None and "id" in request and ("result" in request or "error" in request):
@@ -149,7 +181,7 @@ def main() -> None:
 
         if method == "initialize":
             expected = {
-                "clientInfo": {"name": "codex_orchestrator", "version": "0.3.0"},
+                "clientInfo": {"name": "codex_orchestrator", "version": _client_version},
                 "capabilities": {"experimentalApi": True},
             }
             if params != expected:

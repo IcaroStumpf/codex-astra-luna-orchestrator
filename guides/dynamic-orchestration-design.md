@@ -1,6 +1,6 @@
 # Dynamic orchestration
 
-This fork is becoming an installable Codex plugin with a companion terminal
+This fork is an installable Codex plugin with a companion terminal
 runtime. Existing profile installers remain usable. The new runtime uses the
 installed, signed-in Codex CLI through its app-server protocol; it does not
 implement inference, handle login tokens, or require a separate OpenAI API key.
@@ -32,6 +32,14 @@ events, pending requests, and runner metadata. A foreground `serve` process
 owns one Codex app-server and schedules tasks. Separate CLI invocations and
 the plugin's stdio MCP server communicate through the database. Installation
 does not start a background service or alter global Codex permissions.
+
+Version 0.4 adds declarative workflow definitions and atomic submission of named
+graphs. Workflow IDs group tasks independently of runner IDs; the existing
+scheduler executes their dependency edges. Schema v2 adds workflow records and
+migrates existing v1 tasks without discarding history. Dispatch pause is durable
+and checked atomically at task claim. Steering captures run/thread/turn identity
+and never automatically replays uncertain delivery. Terminal views and reports
+derive from observed state and separate managed/native token counters.
 
 The runner holds an operating-system lock. Only one runner may dispatch work
 for a project. It treats an explicit completed turn as completion; elapsed time,

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codex-orchestrator"
-version = "0.3.0"
+version = "0.4.0"
 description = "A local CLI and Codex plugin for visible, configurable agent teams"
 requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
